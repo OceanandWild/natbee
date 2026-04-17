@@ -1,0 +1,1826 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>NatBee - Trono del Nectar</title>
+  <style>
+    :root {
+      --bg: #070f16;
+    }
+
+    * { box-sizing: border-box; }
+
+    html, body {
+      margin: 0;
+      width: 100%;
+      height: 100%;
+      overflow: hidden;
+      background: var(--bg);
+      font-family: "Segoe UI", Tahoma, sans-serif;
+    }
+
+    canvas {
+      display: block;
+      width: 100vw;
+      height: 100vh;
+      background: #102131;
+      cursor: default;
+    }
+  </style>
+</head>
+<body>
+  <canvas id="game"></canvas>
+
+  <script>
+    const canvas = document.getElementById('game');
+    const ctx = canvas.getContext('2d');
+
+    function fitCanvas() {
+      const dpr = Math.max(1, Math.min(2, window.devicePixelRatio || 1));
+      const w = Math.floor(window.innerWidth);
+      const h = Math.floor(window.innerHeight);
+      canvas.width = Math.floor(w * dpr);
+      canvas.height = Math.floor(h * dpr);
+      canvas.style.width = w + 'px';
+      canvas.style.height = h + 'px';
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      world.w = w;
+      world.h = h;
+      world.splitX = Math.floor(world.w * 0.72);
+      recalcHudRects();
+      resetPlayerInsideBounds();
+    }
+
+    const world = { w: 1280, h: 720, splitX: 920 };
+
+    const AREAS = [
+      {
+        id: 1,
+        name: 'Area 1: Valles de Floralia',
+        fieldName: 'Campo de Lavandas',
+        fieldsLabel: 'Lavandas • Girasoles • Amapolas',
+        biomes: [
+          { id: 'lavanda', name: 'Jardin de Lavandas', x0: 0.00, x1: 0.33, quota: 18, type: 'lavender' },
+          { id: 'girasol', name: 'Claros de Girasoles', x0: 0.33, x1: 0.66, quota: 16, type: 'sunflower' },
+          { id: 'amapola', name: 'Borde de Amapolas', x0: 0.66, x1: 1.00, quota: 14, type: 'poppy' }
+        ]
+      }
+    ];
+
+    const FLOWER_TYPES = {
+      lavender: { name: 'Lavanda', petalsA: '#7b4dff', petalsB: '#a66bff', center: '#f5e38f', pollenMin: 2, pollenMax: 5, royalBonus: 1 },
+      sunflower: { name: 'Girasol', petalsA: '#ffca2b', petalsB: '#ffb100', center: '#7d4a1f', pollenMin: 4, pollenMax: 8, royalBonus: 2 },
+      poppy: { name: 'Amapola', petalsA: '#ff476f', petalsB: '#ff244f', center: '#2f1f1f', pollenMin: 3, pollenMax: 6, royalBonus: 1 }
+    };
+
+    const state = {
+      areaIndex: 0,
+      zone: 'field',
+      hiveRoofFade: 1,
+      pollen: 0,
+      pollenCap: 25,
+      royalPollen: 0,
+      honey: 0,
+      upgrades: { cap: 0, speed: 0, refine: 0 }
+    };
+
+    const player = {
+      x: 220,
+      y: 320,
+      vx: 0,
+      vy: 0,
+      speed: 220,
+      bob: 0
+    };
+
+    const keys = Object.create(null);
+    const flowers = [];
+    const hiveCells = [];
+    const hiveBees = [];
+    const fxParticles = [];
+    const uiButtons = [];
+    const uiNotice = { text: '', kind: 'info', timer: 0 };
+    let lastPointerDownAt = 0;
+    const uiState = {
+      panelOpen: false,
+      colonyOpen: false,
+      selectedRole: 'offensive'
+    };
+    const raidState = {
+      flash: 0,
+      pulse: 0,
+      sirenTimer: 0
+    };
+    const enemies = [];
+    const rewardDrops = [];
+    const offensiveBees = [];
+    const workerBeesUnits = [];
+    const pollinatorBees = [];
+
+    const colony = {
+      assignedEnemyId: null,
+      assignedBiomeId: 'lavanda',
+      deliveredLoot: 0,
+      spawnTimer: 0,
+      species: {
+        offensive: 'sting-guard',
+        worker: 'amber-hauler',
+        pollinator: 'lavender-scout'
+      },
+      counts: {
+        offensive: 4,
+        worker: 3,
+        pollinator: 4
+      }
+    };
+
+    const BEE_SPECIES = {
+      offensive: [
+        {
+          id: 'sting-guard', name: 'Guardia Aguijon', rarity: 'Comun', damage: 8, atkCd: 0.65, speed: 118, range: 64, color: '#ff9168',
+          abilities: [{ name: 'Piquete Rapido', kind: 'active' }],
+          unlock: () => true
+        },
+        {
+          id: 'scarlet-lancer', name: 'Lancero Escarlata', rarity: 'Epico', damage: 12, atkCd: 0.56, speed: 136, range: 70, color: '#ff5976',
+          abilities: [{ name: 'Estocada Escarlata', kind: 'active' }],
+          unlock: () => state.royalPollen >= 220
+        },
+        {
+          id: 'obsidian-warden', name: 'Guardian Obsidiana', rarity: 'Legendario', damage: 18, atkCd: 0.48, speed: 150, range: 74, color: '#ff2e48',
+          abilities: [{ name: 'Muro de Aguijones', kind: 'active' }],
+          unlock: () => state.honey >= 550 && state.upgrades.speed >= 4
+        },
+        {
+          id: 'sting-king', name: 'Abeja Rey de los Aguijones', rarity: 'Mitico', damage: 24, atkCd: 0.44, speed: 166, range: 84, color: '#ff1f46',
+          thornCooldown: 14.5,
+          abilities: [
+            { name: 'Lluvia de 7 Aguijones', kind: 'active' },
+            { name: 'Impulso de Colmena (+50% Trabajadoras)', kind: 'passive' }
+          ],
+          unlock: () => state.honey >= 1600 && state.royalPollen >= 850 && colony.deliveredLoot >= 18
+        }
+      ],
+      worker: [
+        { id: 'amber-hauler', name: 'Cargadora Ambar', rarity: 'Comun', speed: 100, carry: 1, color: '#ffd27a', abilities: [{ name: 'Carga Basica', kind: 'active' }], unlock: () => true },
+        { id: 'resin-porter', name: 'Portadora Resina', rarity: 'Raro', speed: 114, carry: 2, color: '#ffcf66', abilities: [{ name: 'Doble Fardo', kind: 'active' }], unlock: () => state.honey >= 260 },
+        { id: 'royal-freighter', name: 'Carguera Real', rarity: 'Legendario', speed: 126, carry: 3, color: '#ffe9ad', abilities: [{ name: 'Carga Triple', kind: 'active' }], unlock: () => state.honey >= 900 && state.royalPollen >= 480 }
+      ],
+      pollinator: [
+        { id: 'lavender-scout', name: 'Exploradora Lavanda', rarity: 'Poco Comun', speed: 94, gather: 1.0, color: '#a98bff', abilities: [{ name: 'Recolecta Fina', kind: 'active' }], unlock: () => true },
+        { id: 'sunflare-forager', name: 'Recolectora Solar', rarity: 'Epico', speed: 104, gather: 1.45, color: '#ffc246', abilities: [{ name: 'Polen Solar', kind: 'active' }], unlock: () => state.upgrades.cap >= 3 },
+        { id: 'moon-pollen-oracle', name: 'Oraculo del Polen', rarity: 'Mitico', speed: 116, gather: 2.1, color: '#90e1ff', abilities: [{ name: 'Pulso Lunar', kind: 'active' }], unlock: () => state.honey >= 1200 && state.upgrades.refine >= 4 }
+      ]
+    };
+
+    const upgradeDefs = {
+      cap: {
+        key: 'cap',
+        base: 40,
+        scale: 1.58,
+        max: 8,
+        apply() { state.pollenCap += 5; }
+      },
+      speed: {
+        key: 'speed',
+        base: 50,
+        scale: 1.64,
+        max: 6,
+        apply() { player.speed += 18; }
+      },
+      refine: {
+        key: 'refine',
+        base: 70,
+        scale: 1.72,
+        max: 5,
+        apply() {}
+      }
+    };
+
+    const hud = {
+      x: 14, y: 14, w: 320, h: 0,
+      visible: true,
+      title: { x: 30, y: 40 },
+      cards: [],
+      upgradesTitleY: 0,
+      footerY: 0
+    };
+
+    const AudioFx = {
+      ctx: null,
+      started: false,
+      lastFlutterAt: 0,
+      init() {
+        if (this.started) return;
+        this.ctx = new (window.AudioContext || window.webkitAudioContext)();
+        this.started = true;
+      },
+      flutter(v) {
+        if (!this.started || v < 0.25) return;
+        const now = performance.now();
+        if (now - this.lastFlutterAt < 95) return;
+        this.lastFlutterAt = now;
+        this.blip(130 + Math.random() * 45, 0.022, 0.008, 'sine');
+      },
+      blip(freq = 700, dur = 0.06, vol = 0.06, type = 'triangle') {
+        if (!this.started) return;
+        const t = this.ctx.currentTime;
+        const o = this.ctx.createOscillator();
+        const g = this.ctx.createGain();
+        o.type = type;
+        o.frequency.value = freq;
+        g.gain.setValueAtTime(0.0001, t);
+        g.gain.exponentialRampToValueAtTime(vol, t + 0.01);
+        g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+        o.connect(g);
+        g.connect(this.ctx.destination);
+        o.start(t);
+        o.stop(t + dur);
+      }
+    };
+
+    function rand(min, max) { return Math.random() * (max - min) + min; }
+    function getCurrentArea() { return AREAS[state.areaIndex] || AREAS[0]; }
+    function dist2(ax, ay, bx, by) { const dx = ax - bx; const dy = ay - by; return dx * dx + dy * dy; }
+
+    function getSpecies(role, id) {
+      const list = BEE_SPECIES[role] || [];
+      return list.find(s => s.id === id) || list[0];
+    }
+
+    function getActiveSpecies(role) {
+      return getSpecies(role, colony.species[role]);
+    }
+
+    function isSpeciesUnlocked(role, id) {
+      const s = getSpecies(role, id);
+      return !!(s && s.unlock && s.unlock());
+    }
+
+    function cycleSpecies(role) {
+      const list = BEE_SPECIES[role] || [];
+      if (!list.length) return;
+      const currentIdx = Math.max(0, list.findIndex(s => s.id === colony.species[role]));
+      for (let i = 1; i <= list.length; i++) {
+        const s = list[(currentIdx + i) % list.length];
+        if (s.unlock()) {
+          colony.species[role] = s.id;
+          setUINotice(`${role}: ${s.name}`, 'ok');
+          return;
+        }
+      }
+      setUINotice(`No hay variantes desbloqueadas para ${role}.`, 'warn');
+    }
+
+    function cycleAssignedBiome() {
+      const area = getCurrentArea();
+      if (!area.biomes.length) return;
+      const idx = Math.max(0, area.biomes.findIndex(b => b.id === colony.assignedBiomeId));
+      const next = area.biomes[(idx + 1) % area.biomes.length];
+      colony.assignedBiomeId = next.id;
+      setUINotice(`Polinizadoras asignadas a ${next.name}.`, 'info');
+      for (const b of pollinatorBees) b.targetFlowerId = null;
+    }
+
+    function getUpgradeCost(key) {
+      const d = upgradeDefs[key];
+      const lvl = state.upgrades[key] || 0;
+      return Math.floor(d.base * Math.pow(d.scale, lvl));
+    }
+
+    function setUINotice(text, kind = 'info') {
+      uiNotice.text = text;
+      uiNotice.kind = kind;
+      uiNotice.timer = 1.6;
+    }
+
+    function buyUpgrade(key) {
+      const d = upgradeDefs[key];
+      if (!d) return 'invalid';
+      if ((state.upgrades[key] || 0) >= d.max) return 'max';
+      const cost = getUpgradeCost(key);
+      if (state.royalPollen < cost) return 'insufficient';
+      state.royalPollen -= cost;
+      state.upgrades[key] += 1;
+      d.apply();
+      AudioFx.blip(520, 0.08, 0.03, 'triangle');
+      return 'ok';
+    }
+
+    function spawnFlowerInBiome(biome) {
+      const t = FLOWER_TYPES[biome.type];
+      const xMin = 35 + (world.splitX - 70) * biome.x0;
+      const xMax = 35 + (world.splitX - 70) * biome.x1;
+      return {
+        _id: `flower-${Math.floor(Math.random() * 1e9)}`,
+        x: rand(xMin, xMax),
+        y: rand(70, world.h - 40),
+        pollen: Math.floor(rand(t.pollenMin, t.pollenMax + 1)),
+        radius: rand(8, 14),
+        type: biome.type,
+        biomeId: biome.id
+      };
+    }
+
+    function initField() {
+      flowers.length = 0;
+      const area = getCurrentArea();
+      for (const biome of area.biomes) {
+        for (let i = 0; i < biome.quota; i++) {
+          flowers.push(spawnFlowerInBiome(biome));
+        }
+      }
+    }
+
+    function initHive() {
+      hiveCells.length = 0;
+      const cols = 5;
+      const rows = 5;
+      for (let row = 0; row < rows; row++) {
+        for (let col = 0; col < cols; col++) {
+          hiveCells.push({
+            x: world.splitX + 100 + col * 45 + (row % 2) * 22.5,
+            y: 100 + row * 38
+          });
+        }
+      }
+
+      hiveBees.length = 0;
+      for (let i = 0; i < 7; i++) {
+        hiveBees.push({
+          x: rand(world.splitX + 36, world.w - 42),
+          y: rand(72, world.h - 72),
+          dx: rand(-22, 22),
+          dy: rand(-22, 22),
+          t: rand(0, Math.PI * 2)
+        });
+      }
+    }
+
+    function makeBeeUnit(role, i, total) {
+      const angle = (Math.PI * 2 / Math.max(1, total)) * i;
+      return {
+        id: `${role}-${i}-${Math.floor(Math.random() * 9999)}`,
+        role,
+        x: world.splitX + 84 + Math.cos(angle) * 34,
+        y: world.h - 92 + Math.sin(angle) * 24,
+        vx: 0,
+        vy: 0,
+        cooldown: rand(0, 0.5),
+        skillCooldown: rand(4, 10),
+        cargo: null,
+        targetId: null,
+        targetFlowerId: null,
+        pollinationTimer: 0,
+        wobble: rand(0, Math.PI * 2)
+      };
+    }
+
+    function initColonySystems() {
+      enemies.length = 0;
+      rewardDrops.length = 0;
+      offensiveBees.length = 0;
+      workerBeesUnits.length = 0;
+      pollinatorBees.length = 0;
+      colony.assignedEnemyId = null;
+      colony.deliveredLoot = 0;
+      colony.spawnTimer = 2.5;
+
+      for (let i = 0; i < colony.counts.offensive; i++) {
+        offensiveBees.push(makeBeeUnit('offensive', i, colony.counts.offensive));
+      }
+      for (let i = 0; i < colony.counts.worker; i++) {
+        workerBeesUnits.push(makeBeeUnit('worker', i, colony.counts.worker));
+      }
+      for (let i = 0; i < colony.counts.pollinator; i++) {
+        pollinatorBees.push(makeBeeUnit('pollinator', i, colony.counts.pollinator));
+      }
+    }
+
+    function spawnEnemy() {
+      const area = getCurrentArea();
+      const biome = area.biomes[Math.floor(rand(0, area.biomes.length))];
+      const startX = 35 + (world.splitX - 70) * rand(biome.x0, biome.x1);
+      const baseY = rand(78, world.h - 64);
+      enemies.push({
+        id: `enemy-${Math.floor(Math.random() * 1e7)}`,
+        x: startX,
+        y: baseY,
+        hp: 36 + rand(0, 34),
+        maxHp: 70,
+        speed: 36 + rand(0, 28),
+        size: rand(11, 16),
+        t: rand(0, Math.PI * 2),
+        raidDamage: 7 + Math.floor(rand(0, 8)),
+        state: 'approach',
+        spawnBiomeName: biome.name
+      });
+      raidState.flash = Math.max(raidState.flash, 0.65);
+      setUINotice(`Raid detectado desde ${biome.name}.`, 'warn');
+    }
+
+    function moveToward(unit, tx, ty, speed, dt) {
+      const dx = tx - unit.x;
+      const dy = ty - unit.y;
+      const d = Math.hypot(dx, dy) || 1;
+      unit.vx = dx / d * speed;
+      unit.vy = dy / d * speed;
+      unit.x += unit.vx * dt;
+      unit.y += unit.vy * dt;
+      unit.wobble += dt * 4;
+    }
+
+    function updateEnemyWaves(dt) {
+      const maxEnemies = 6;
+      colony.spawnTimer -= dt;
+      if (colony.spawnTimer <= 0 && enemies.length < maxEnemies) {
+        spawnEnemy();
+        colony.spawnTimer = rand(4.2, 7.8);
+      }
+
+      const altarX = world.splitX + 108;
+      const altarY = world.h - 74;
+      const gateX = world.splitX + 14;
+      const gateY = world.h * 0.53;
+      for (let i = enemies.length - 1; i >= 0; i--) {
+        const e = enemies[i];
+        e.t += dt * 3.2;
+        if (e.state === 'approach') {
+          const dx = gateX - e.x;
+          const dy = gateY - e.y;
+          const d = Math.hypot(dx, dy) || 1;
+          e.x += (dx / d) * e.speed * dt;
+          e.y += (dy / d) * e.speed * dt;
+          if (d < 18) e.state = 'raid';
+        } else {
+          const dx = altarX - e.x;
+          const dy = altarY - e.y;
+          const d = Math.hypot(dx, dy) || 1;
+          e.x += (dx / d) * (e.speed * 0.88) * dt;
+          e.y += (dy / d) * (e.speed * 0.88) * dt + Math.sin(e.t) * 4 * dt;
+        }
+        if (e.x < altarX + 20 && Math.abs(e.y - altarY) < 80) {
+          state.honey = Math.max(0, state.honey - e.raidDamage);
+          spawnHoneyBurst(altarX, altarY, 3);
+          raidState.flash = Math.max(raidState.flash, 0.9);
+          enemies.splice(i, 1);
+          setUINotice('Un enemigo robo nectar de la colmena.', 'warn');
+          continue;
+        }
+        if (e.hp <= 0) {
+          rewardDrops.push({
+            id: `drop-${Math.floor(Math.random() * 1e7)}`,
+            x: e.x,
+            y: e.y,
+            claimWorkerId: null,
+            honeyReward: 12 + Math.floor(rand(0, 18)),
+            royalReward: 5 + Math.floor(rand(0, 11)),
+            iconSpin: rand(0, Math.PI * 2)
+          });
+          spawnPollenBurst(e.x, e.y, 6);
+          enemies.splice(i, 1);
+          if (colony.assignedEnemyId === e.id) colony.assignedEnemyId = null;
+        }
+      }
+    }
+
+    function findEnemyById(id) {
+      return enemies.find(e => e.id === id) || null;
+    }
+
+    function updateOffensiveBees(dt) {
+      const species = getActiveSpecies('offensive');
+      const homeX = world.splitX + 114;
+      const homeY = world.h - 80;
+      for (const b of offensiveBees) {
+        b.cooldown -= dt;
+        b.skillCooldown -= dt;
+        let target = null;
+        if (colony.assignedEnemyId) {
+          target = findEnemyById(colony.assignedEnemyId);
+        }
+        if (!target) {
+          let best = null;
+          let bestD = Infinity;
+          for (const e of enemies) {
+            const d = dist2(b.x, b.y, e.x, e.y);
+            if (d < bestD) { best = e; bestD = d; }
+          }
+          target = best;
+        }
+
+        if (target) {
+          moveToward(b, target.x, target.y, species.speed, dt);
+          const d2v = dist2(b.x, b.y, target.x, target.y);
+          if (d2v < species.range * species.range && b.cooldown <= 0) {
+            target.hp -= species.damage;
+            b.cooldown = species.atkCd;
+            spawnPollenBurst(target.x, target.y, 1);
+            AudioFx.blip(190 + Math.random() * 70, 0.03, 0.013, 'square');
+          }
+
+          // Mythic active skill: 7 thorn strikes every 14.5s if battle requirements are met.
+          if (
+            species.id === 'sting-king' &&
+            species.thornCooldown &&
+            b.skillCooldown <= 0 &&
+            d2v < (species.range + 28) * (species.range + 28) &&
+            enemies.length > 0
+          ) {
+            for (let i = 0; i < 7; i++) {
+              const ang = (Math.PI * 2 / 7) * i;
+              const sx = target.x + Math.cos(ang) * 18;
+              const sy = target.y + Math.sin(ang) * 18;
+              spawnPollenBurst(sx, sy, 2);
+              target.hp -= 11;
+            }
+            AudioFx.blip(120, 0.10, 0.045, 'sawtooth');
+            AudioFx.blip(240, 0.06, 0.03, 'square');
+            b.skillCooldown = species.thornCooldown;
+            setUINotice('Abeja Rey: Lluvia de 7 Aguijones activada.', 'warn');
+          }
+        } else {
+          const ox = Math.cos(b.wobble * 0.7) * 26;
+          const oy = Math.sin(b.wobble) * 18;
+          moveToward(b, homeX + ox, homeY + oy, species.speed * 0.55, dt);
+        }
+      }
+    }
+
+    function findClosestUnclaimedDrop(x, y) {
+      let best = null;
+      let bestD = Infinity;
+      for (const d of rewardDrops) {
+        if (d.claimWorkerId) continue;
+        const dd = dist2(x, y, d.x, d.y);
+        if (dd < bestD) {
+          best = d;
+          bestD = dd;
+        }
+      }
+      return best;
+    }
+
+    function updateWorkerBees(dt) {
+      const species = getActiveSpecies('worker');
+      const offensive = getActiveSpecies('offensive');
+      const speedBuff = (offensive.id === 'sting-king' && enemies.length > 0) ? 1.5 : 1;
+      const altarX = world.splitX + 106;
+      const altarY = world.h - 74;
+      for (const b of workerBeesUnits) {
+        if (b.cargo) {
+          moveToward(b, altarX, altarY, species.speed * speedBuff, dt);
+          if (dist2(b.x, b.y, altarX, altarY) < 26 * 26) {
+            state.honey += b.cargo.honeyReward;
+            state.royalPollen += b.cargo.royalReward;
+            colony.deliveredLoot += 1;
+            spawnHoneyBurst(altarX, altarY, 4);
+            AudioFx.blip(420, 0.06, 0.022, 'triangle');
+            const idx = rewardDrops.findIndex(r => r.id === b.cargo.id);
+            if (idx >= 0) rewardDrops.splice(idx, 1);
+            b.cargo = null;
+            b.targetId = null;
+          }
+          continue;
+        }
+
+        let targetDrop = b.targetId ? rewardDrops.find(r => r.id === b.targetId) : null;
+        if (!targetDrop || (targetDrop.claimWorkerId && targetDrop.claimWorkerId !== b.id)) {
+          targetDrop = findClosestUnclaimedDrop(b.x, b.y);
+          b.targetId = targetDrop ? targetDrop.id : null;
+          if (targetDrop) targetDrop.claimWorkerId = b.id;
+        }
+        if (targetDrop) {
+          moveToward(b, targetDrop.x, targetDrop.y, species.speed * speedBuff, dt);
+          if (dist2(b.x, b.y, targetDrop.x, targetDrop.y) < 20 * 20) {
+            b.cargo = targetDrop;
+          }
+        } else {
+          b.wobble += dt * 2;
+          moveToward(
+            b,
+            altarX + Math.cos(b.wobble) * 34,
+            altarY + Math.sin(b.wobble * 1.2) * 24,
+            species.speed * 0.45 * speedBuff,
+            dt
+          );
+        }
+      }
+    }
+
+    function updatePollinatorBees(dt) {
+      const species = getActiveSpecies('pollinator');
+      const altarX = world.splitX + 96;
+      const altarY = world.h - 78;
+      for (const b of pollinatorBees) {
+        if (!b.cargo) b.cargo = { pollen: 0 };
+        if (b.targetFlowerId) {
+          const flower = flowers.find(f => f._id === b.targetFlowerId);
+          if (!flower || flower.pollen <= 0 || flower.biomeId !== colony.assignedBiomeId) {
+            b.targetFlowerId = null;
+          }
+        }
+        if (!b.targetFlowerId && b.cargo.pollen <= 0) {
+          const choices = flowers.filter(f => f.biomeId === colony.assignedBiomeId && f.pollen > 0);
+          if (choices.length) {
+            const chosen = choices[Math.floor(rand(0, choices.length))];
+            b.targetFlowerId = chosen._id;
+          }
+        }
+
+        if (b.cargo.pollen > 0 && !b.targetFlowerId) {
+          moveToward(b, altarX, altarY, species.speed, dt);
+          if (dist2(b.x, b.y, altarX, altarY) < 24 * 24) {
+            const gain = b.cargo.pollen;
+            const room = Math.max(0, state.pollenCap - state.pollen);
+            const toBag = Math.min(room, gain);
+            state.pollen += toBag;
+            state.royalPollen += Math.ceil(gain * 0.7);
+            b.cargo.pollen = 0;
+            spawnPollenBurst(altarX, altarY, 2);
+          }
+          continue;
+        }
+
+        const flower = flowers.find(f => f._id === b.targetFlowerId);
+        if (flower) {
+          moveToward(b, flower.x, flower.y, species.speed, dt);
+          if (dist2(b.x, b.y, flower.x, flower.y) < 18 * 18) {
+            b.pollinationTimer += dt;
+            if (b.pollinationTimer > 0.52) {
+              const take = Math.min(flower.pollen, Math.max(1, Math.floor(species.gather)));
+              flower.pollen -= take;
+              b.cargo.pollen += Math.max(1, Math.floor(take * species.gather));
+              b.targetFlowerId = null;
+              b.pollinationTimer = 0;
+              spawnPollenBurst(flower.x, flower.y, 1);
+            }
+          }
+        } else {
+          b.targetFlowerId = null;
+          moveToward(b, altarX, altarY, species.speed * 0.7, dt);
+        }
+      }
+    }
+
+    function resetPlayerInsideBounds() {
+      player.x = Math.max(20, Math.min(world.w - 20, player.x));
+      player.y = Math.max(28, Math.min(world.h - 20, player.y));
+    }
+
+    function resetGame() {
+      state.pollen = 0;
+      state.royalPollen = 0;
+      state.pollenCap = 25;
+      state.honey = 0;
+      state.upgrades.cap = 0;
+      state.upgrades.speed = 0;
+      state.upgrades.refine = 0;
+      player.speed = 220;
+      player.x = Math.max(220, world.w * 0.18);
+      player.y = world.h * 0.5;
+      initField();
+      initHive();
+      initColonySystems();
+    }
+
+    function recalcHudRects() {
+      hud.x = 14;
+      hud.y = 14;
+      hud.w = Math.min(340, Math.max(280, world.w * 0.25));
+      hud.cards = [];
+      const pad = 10;
+      const gap = 8;
+      const cardH = 40;
+      const cardW = Math.floor((hud.w - pad * 2 - gap) / 2);
+      const y = hud.y + 52;
+      for (let i = 0; i < 4; i++) {
+        const col = i % 2;
+        const row = Math.floor(i / 2);
+        hud.cards.push({
+          x: hud.x + pad + col * (cardW + gap),
+          y: y + row * (cardH + gap),
+          w: cardW,
+          h: cardH
+        });
+      }
+      hud.upgradesTitleY = y + cardH * 2 + gap + 12;
+      hud.footerY = hud.upgradesTitleY + 132;
+      hud.h = hud.footerY + 56 - hud.y;
+    }
+
+    function spawnPollenBurst(x, y, amount) {
+      const count = Math.min(16, 5 + amount * 2);
+      for (let i = 0; i < count; i++) {
+        fxParticles.push({
+          x, y,
+          vx: rand(-60, 60),
+          vy: rand(-90, -15),
+          g: 95,
+          life: rand(0.22, 0.48),
+          color: Math.random() > 0.35 ? '#ffd84d' : '#fff3b0',
+          size: rand(1.8, 3.4)
+        });
+      }
+    }
+
+    function spawnHoneyBurst(x, y, amount) {
+      const count = Math.min(26, 8 + amount);
+      for (let i = 0; i < count; i++) {
+        fxParticles.push({
+          x, y,
+          vx: rand(-120, 120),
+          vy: rand(-130, -35),
+          g: 145,
+          life: rand(0.28, 0.65),
+          color: Math.random() > 0.3 ? '#ffb347' : '#ffd27a',
+          size: rand(2.2, 4.8)
+        });
+      }
+    }
+
+    function update(dt) {
+      const xDir = (keys.KeyD || keys.ArrowRight ? 1 : 0) - (keys.KeyA || keys.ArrowLeft ? 1 : 0);
+      const yDir = (keys.KeyS || keys.ArrowDown ? 1 : 0) - (keys.KeyW || keys.ArrowUp ? 1 : 0);
+      const moveIntensity = Math.min(1, Math.hypot(xDir, yDir));
+      AudioFx.flutter(moveIntensity);
+
+      player.vx = xDir * player.speed;
+      player.vy = yDir * player.speed;
+      player.x += player.vx * dt;
+      player.y += player.vy * dt;
+      player.x = Math.max(18, Math.min(world.w - 18, player.x));
+      player.y = Math.max(26, Math.min(world.h - 20, player.y));
+      player.bob += dt * 8;
+      state.zone = player.x < world.splitX ? 'field' : 'hive';
+      const roofTarget = state.zone === 'hive' ? 0 : 1;
+      state.hiveRoofFade += (roofTarget - state.hiveRoofFade) * Math.min(1, dt * 5.2);
+
+      if (player.x < world.splitX && state.pollen < state.pollenCap) {
+        for (let i = flowers.length - 1; i >= 0; i--) {
+          const f = flowers[i];
+          const dx = player.x - f.x;
+          const dy = player.y - f.y;
+          const d2 = dx * dx + dy * dy;
+          if (d2 < (f.radius + 18) * (f.radius + 18)) {
+            const canTake = Math.min(f.pollen, state.pollenCap - state.pollen);
+            const flowerType = FLOWER_TYPES[f.type] || FLOWER_TYPES.lavender;
+            state.pollen += canTake;
+            state.royalPollen += canTake * flowerType.royalBonus;
+            f.pollen -= canTake;
+            spawnPollenBurst(f.x, f.y, canTake);
+            AudioFx.blip(760 + Math.random() * 140, 0.04, 0.018, 'triangle');
+            if (f.pollen <= 0) flowers.splice(i, 1);
+            if (state.pollen >= state.pollenCap) break;
+          }
+        }
+      }
+
+      if (player.x >= world.splitX + 36 && state.pollen > 0) {
+        spawnHoneyBurst(player.x + 22, player.y - 8, state.pollen);
+        AudioFx.blip(280, 0.12, 0.035, 'sine');
+        AudioFx.blip(420, 0.10, 0.028, 'triangle');
+        const multiplier = 1 + (state.upgrades.refine * 0.2);
+        state.honey += Math.floor(state.pollen * multiplier);
+        state.pollen = 0;
+      }
+
+      updateEnemyWaves(dt);
+      updateOffensiveBees(dt);
+      updateWorkerBees(dt);
+      updatePollinatorBees(dt);
+      raidState.flash = Math.max(0, raidState.flash - dt * 0.55);
+      raidState.pulse += dt * 3.2;
+      if (enemies.length > 0) {
+        raidState.sirenTimer -= dt;
+        if (raidState.sirenTimer <= 0) {
+          AudioFx.blip(140, 0.06, 0.03, 'sawtooth');
+          AudioFx.blip(210, 0.08, 0.028, 'triangle');
+          raidState.sirenTimer = 1.8;
+        }
+      } else {
+        raidState.sirenTimer = 0.4;
+      }
+
+      for (const b of hiveBees) {
+        b.t += dt;
+        b.x += Math.cos(b.t * 1.4) * b.dx * dt;
+        b.y += Math.sin(b.t * 1.8) * b.dy * dt;
+        b.x = Math.max(world.splitX + 25, Math.min(world.w - 20, b.x));
+        b.y = Math.max(30, Math.min(world.h - 24, b.y));
+      }
+
+      const area = getCurrentArea();
+      for (const biome of area.biomes) {
+        const count = flowers.filter(f => f.biomeId === biome.id).length;
+        if (count < Math.max(5, Math.floor(biome.quota * 0.45))) {
+          flowers.push(spawnFlowerInBiome(biome));
+        }
+      }
+
+      for (let i = flowers.length - 1; i >= 0; i--) {
+        if (flowers[i].pollen <= 0) flowers.splice(i, 1);
+      }
+
+      for (let i = fxParticles.length - 1; i >= 0; i--) {
+        const p = fxParticles[i];
+        p.x += p.vx * dt;
+        p.y += p.vy * dt;
+        p.vy += p.g * dt;
+        p.life -= dt;
+        if (p.life <= 0) fxParticles.splice(i, 1);
+      }
+
+      if (uiNotice.timer > 0) uiNotice.timer -= dt;
+    }
+
+    function drawHex(x, y, r, fill, stroke) {
+      ctx.beginPath();
+      for (let i = 0; i < 6; i++) {
+        const a = Math.PI / 3 * i + Math.PI / 6;
+        const px = x + Math.cos(a) * r;
+        const py = y + Math.sin(a) * r;
+        if (i === 0) ctx.moveTo(px, py);
+        else ctx.lineTo(px, py);
+      }
+      ctx.closePath();
+      ctx.fillStyle = fill;
+      ctx.fill();
+      ctx.strokeStyle = stroke;
+      ctx.lineWidth = 2;
+      ctx.stroke();
+    }
+
+    function drawTinyBee(x, y) {
+      ctx.save();
+      ctx.translate(x, y);
+      ctx.scale(0.75, 0.75);
+      ctx.fillStyle = 'rgba(255,255,255,0.4)';
+      ctx.beginPath();
+      ctx.ellipse(-6, -5, 7, 4, -0.4, 0, Math.PI * 2);
+      ctx.ellipse(6, -5, 7, 4, 0.4, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = '#f5b027';
+      ctx.beginPath();
+      ctx.ellipse(0, 0, 10, 7, 0, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.strokeStyle = '#1b1b1b';
+      ctx.lineWidth = 2;
+      for (let i = -4; i <= 4; i += 4) {
+        ctx.beginPath();
+        ctx.moveTo(i, -6);
+        ctx.lineTo(i, 6);
+        ctx.stroke();
+      }
+      ctx.restore();
+    }
+
+    function drawRoleBee(unit, styleColor, wingColor) {
+      const wing = Math.sin(unit.wobble * 4) * 0.3;
+      ctx.save();
+      ctx.translate(unit.x, unit.y);
+      ctx.fillStyle = wingColor;
+      ctx.beginPath();
+      ctx.ellipse(-5, -4, 6.5, 3.2, -0.7 + wing, 0, Math.PI * 2);
+      ctx.ellipse(5, -4, 6.5, 3.2, 0.7 - wing, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = '#f5be32';
+      ctx.beginPath();
+      ctx.ellipse(0, 0, 8, 5.5, 0, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.strokeStyle = '#1d1916';
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      ctx.moveTo(-2, -4);
+      ctx.lineTo(-2, 4);
+      ctx.moveTo(2, -4);
+      ctx.lineTo(2, 4);
+      ctx.stroke();
+      ctx.fillStyle = styleColor;
+      ctx.beginPath();
+      ctx.arc(-5.2, 0, 2.3, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.restore();
+    }
+
+    function drawEnemy(enemy) {
+      const pulse = 0.75 + Math.sin(enemy.t * 4) * 0.14;
+      ctx.save();
+      ctx.translate(enemy.x, enemy.y);
+      ctx.scale(pulse, pulse);
+      ctx.fillStyle = '#2a1116';
+      ctx.beginPath();
+      ctx.ellipse(0, 0, enemy.size, enemy.size * 0.76, 0, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = '#b3212d';
+      ctx.beginPath();
+      ctx.arc(-enemy.size * 0.2, -2, 2.4, 0, Math.PI * 2);
+      ctx.arc(enemy.size * 0.2, -2, 2.4, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.strokeStyle = '#1b0f12';
+      ctx.lineWidth = 1.5;
+      for (let i = -1; i <= 1; i++) {
+        ctx.beginPath();
+        ctx.moveTo(-enemy.size - 4, i * 4);
+        ctx.lineTo(enemy.size + 4, i * 4 + (i === 0 ? 1 : -1));
+        ctx.stroke();
+      }
+      ctx.restore();
+
+      const hpRatio = Math.max(0, enemy.hp / enemy.maxHp);
+      ctx.fillStyle = 'rgba(0,0,0,0.45)';
+      ctx.fillRect(enemy.x - 18, enemy.y - enemy.size - 14, 36, 4);
+      ctx.fillStyle = '#ff5757';
+      ctx.fillRect(enemy.x - 18, enemy.y - enemy.size - 14, 36 * hpRatio, 4);
+    }
+
+    function drawRewardIcon(x, y, spin = 0) {
+      ctx.save();
+      ctx.translate(x, y);
+      ctx.rotate(spin);
+      ctx.fillStyle = '#aa6f2f';
+      ctx.fillRect(-7, -6, 14, 12);
+      ctx.strokeStyle = '#ffd58d';
+      ctx.lineWidth = 1.5;
+      ctx.strokeRect(-7, -6, 14, 12);
+      ctx.beginPath();
+      ctx.moveTo(-7, -1);
+      ctx.lineTo(7, -1);
+      ctx.stroke();
+      ctx.fillStyle = '#ffe8bc';
+      ctx.fillRect(-1, -6, 2, 12);
+      ctx.restore();
+    }
+
+    function drawColonySystems() {
+      const offensiveStyle = getActiveSpecies('offensive').color;
+      const workerStyle = getActiveSpecies('worker').color;
+      const pollinatorStyle = getActiveSpecies('pollinator').color;
+
+      for (const d of rewardDrops) {
+        d.iconSpin += 0.03;
+        drawRewardIcon(d.x, d.y - 3, d.iconSpin * 0.18);
+      }
+      for (const e of enemies) drawEnemy(e);
+
+      for (const b of offensiveBees) {
+        drawRoleBee(b, offensiveStyle, 'rgba(255, 192, 192, 0.52)');
+      }
+      for (const b of workerBeesUnits) {
+        drawRoleBee(b, workerStyle, 'rgba(255, 241, 202, 0.50)');
+        if (b.cargo) drawRewardIcon(b.x + 6, b.y - 7, 0.15);
+      }
+      for (const b of pollinatorBees) {
+        drawRoleBee(b, pollinatorStyle, 'rgba(200, 218, 255, 0.55)');
+        if (b.cargo && b.cargo.pollen > 0) {
+          ctx.fillStyle = 'rgba(255, 220, 120, 0.85)';
+          ctx.beginPath();
+          ctx.arc(b.x + 7, b.y - 4, 2.3, 0, Math.PI * 2);
+          ctx.fill();
+        }
+      }
+    }
+
+    function drawSovereignBee(x, y) {
+      const flap = Math.sin(player.bob * 2.1) * 0.35;
+      const lift = Math.sin(player.bob * 0.75) * 1.8;
+      const tilt = Math.max(-0.22, Math.min(0.22, player.vx / 520));
+      const speedPulse = Math.min(1, Math.hypot(player.vx, player.vy) / (player.speed + 1));
+
+      // Soft ground shadow for depth.
+      ctx.save();
+      ctx.fillStyle = `rgba(20, 14, 10, ${0.18 + speedPulse * 0.16})`;
+      ctx.beginPath();
+      ctx.ellipse(x + tilt * 16, y + 22, 19 + speedPulse * 4, 7 + speedPulse * 2, 0, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.restore();
+
+      ctx.save();
+      ctx.translate(x, y + lift);
+      ctx.rotate(tilt);
+
+      // Crown aura.
+      const aura = ctx.createRadialGradient(0, -18, 2, 0, -18, 30);
+      aura.addColorStop(0, `rgba(110, 245, 255, ${0.40 + speedPulse * 0.15})`);
+      aura.addColorStop(1, 'rgba(110, 245, 255, 0)');
+      ctx.fillStyle = aura;
+      ctx.beginPath();
+      ctx.arc(0, -18, 30, 0, Math.PI * 2);
+      ctx.fill();
+
+      // Wing gradients (back first).
+      const wingL = ctx.createRadialGradient(-12, -14, 3, -12, -14, 18);
+      wingL.addColorStop(0, 'rgba(240, 254, 255, 0.74)');
+      wingL.addColorStop(1, 'rgba(170, 226, 255, 0.20)');
+      const wingR = ctx.createRadialGradient(12, -14, 3, 12, -14, 18);
+      wingR.addColorStop(0, 'rgba(240, 254, 255, 0.74)');
+      wingR.addColorStop(1, 'rgba(170, 226, 255, 0.20)');
+
+      ctx.strokeStyle = 'rgba(255,255,255,0.40)';
+      ctx.lineWidth = 1.15;
+      ctx.fillStyle = wingL;
+      ctx.beginPath();
+      ctx.ellipse(-13, -12, 15, 7.5, -0.82 + flap, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.stroke();
+      ctx.fillStyle = wingR;
+      ctx.beginPath();
+      ctx.ellipse(13, -12, 15, 7.5, 0.82 - flap, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.stroke();
+
+      // Body with richer gradient.
+      const bodyGrad = ctx.createLinearGradient(-20, -3, 22, 6);
+      bodyGrad.addColorStop(0, '#ffdf73');
+      bodyGrad.addColorStop(0.55, '#f7be35');
+      bodyGrad.addColorStop(1, '#d88d17');
+      ctx.fillStyle = bodyGrad;
+      ctx.beginPath();
+      ctx.ellipse(2, 0, 19, 12.8, 0.05, 0, Math.PI * 2);
+      ctx.fill();
+
+      // Body outline and stripes.
+      ctx.strokeStyle = '#2f2516';
+      ctx.lineWidth = 2;
+      ctx.stroke();
+      ctx.strokeStyle = '#2a2013';
+      ctx.lineWidth = 2.3;
+      [-9, -2, 5, 12].forEach(s => {
+        ctx.beginPath();
+        ctx.moveTo(s, -9);
+        ctx.lineTo(s + 1, 9);
+        ctx.stroke();
+      });
+
+      // Abdomen tip.
+      const tailGrad = ctx.createLinearGradient(18, 0, 30, 0);
+      tailGrad.addColorStop(0, '#2f2a22');
+      tailGrad.addColorStop(1, '#17120d');
+      ctx.fillStyle = tailGrad;
+      ctx.beginPath();
+      ctx.moveTo(19, 0);
+      ctx.lineTo(31, -4.5);
+      ctx.lineTo(31, 4.5);
+      ctx.closePath();
+      ctx.fill();
+
+      // Head.
+      const headGrad = ctx.createRadialGradient(-15, -1, 2, -15, -1, 10);
+      headGrad.addColorStop(0, '#3a3734');
+      headGrad.addColorStop(1, '#161413');
+      ctx.fillStyle = headGrad;
+      ctx.beginPath();
+      ctx.arc(-15, 0, 8.2, 0, Math.PI * 2);
+      ctx.fill();
+
+      // Antennas.
+      ctx.strokeStyle = '#1a1715';
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      ctx.moveTo(-19, -5);
+      ctx.quadraticCurveTo(-24, -13, -27, -17);
+      ctx.moveTo(-12, -5);
+      ctx.quadraticCurveTo(-10, -14, -8, -18);
+      ctx.stroke();
+      ctx.fillStyle = '#58d9ff';
+      ctx.beginPath();
+      ctx.arc(-27, -17, 1.9, 0, Math.PI * 2);
+      ctx.arc(-8, -18, 1.9, 0, Math.PI * 2);
+      ctx.fill();
+
+      // Eyes.
+      ctx.fillStyle = '#0b1118';
+      ctx.beginPath();
+      ctx.ellipse(-18, -1.5, 2.8, 3.1, -0.12, 0, Math.PI * 2);
+      ctx.ellipse(-13, -1.3, 2.6, 3, 0.1, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = '#6df0ff';
+      ctx.beginPath();
+      ctx.arc(-18.5, -2.2, 1.05, 0, Math.PI * 2);
+      ctx.arc(-13.5, -2, 1, 0, Math.PI * 2);
+      ctx.fill();
+
+      // Crown.
+      const crownGrad = ctx.createLinearGradient(-9, -25, 9, -13);
+      crownGrad.addColorStop(0, '#ffe896');
+      crownGrad.addColorStop(1, '#e5b22a');
+      ctx.fillStyle = crownGrad;
+      ctx.beginPath();
+      ctx.moveTo(-9, -14);
+      ctx.lineTo(-6, -24);
+      ctx.lineTo(-1.5, -15.5);
+      ctx.lineTo(1.5, -25);
+      ctx.lineTo(5.5, -15.5);
+      ctx.lineTo(9, -23);
+      ctx.lineTo(11, -14);
+      ctx.closePath();
+      ctx.fill();
+      ctx.strokeStyle = '#bf8f1f';
+      ctx.lineWidth = 1;
+      ctx.stroke();
+      ctx.fillStyle = '#7cf2ff';
+      ctx.beginPath();
+      ctx.arc(-6, -22.5, 1.4, 0, Math.PI * 2);
+      ctx.arc(1.5, -23.8, 1.5, 0, Math.PI * 2);
+      ctx.arc(9, -21.3, 1.2, 0, Math.PI * 2);
+      ctx.fill();
+
+      // Moving shimmer tail.
+      ctx.strokeStyle = `rgba(127, 234, 255, ${0.2 + speedPulse * 0.3})`;
+      ctx.lineWidth = 1.6;
+      ctx.beginPath();
+      ctx.moveTo(-3, 2);
+      ctx.quadraticCurveTo(-13 - speedPulse * 9, 3 + Math.sin(player.bob) * 2, -23 - speedPulse * 13, 1);
+      ctx.stroke();
+
+      ctx.restore();
+    }
+
+    function drawLavenderFlower(f) {
+      const sway = Math.sin((f.x + performance.now() * 0.05) * 0.02) * 0.22;
+      ctx.save();
+      ctx.translate(f.x, f.y);
+      ctx.rotate(sway);
+
+      // Stem
+      ctx.strokeStyle = '#3f8f4d';
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.moveTo(0, 8);
+      ctx.lineTo(0, -10);
+      ctx.stroke();
+
+      // Lavender spike buds
+      const buds = 6;
+      for (let i = 0; i < buds; i++) {
+        const t = i / (buds - 1);
+        const by = 3 - i * 3;
+        const bx = (i % 2 === 0 ? -1 : 1) * (1.2 + t * 1.8);
+        ctx.fillStyle = i % 2 ? '#8d63ff' : '#a883ff';
+        ctx.beginPath();
+        ctx.ellipse(bx, by, 2.6 - t * 0.5, 2.2 - t * 0.4, 0.2, 0, Math.PI * 2);
+        ctx.fill();
+      }
+
+      ctx.fillStyle = '#f4e9bb';
+      ctx.beginPath();
+      ctx.arc(0, 4, 1.5, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.restore();
+    }
+
+    function drawSunflower(f) {
+      const petals = 16;
+      const outer = f.radius * 1.15;
+      for (let i = 0; i < petals; i++) {
+        const a = (Math.PI * 2 / petals) * i;
+        const px = f.x + Math.cos(a) * outer * 0.72;
+        const py = f.y + Math.sin(a) * outer * 0.72;
+        ctx.fillStyle = i % 2 ? '#ffc62e' : '#ffb100';
+        ctx.beginPath();
+        ctx.ellipse(px, py, f.radius * 0.7, f.radius * 0.28, a, 0, Math.PI * 2);
+        ctx.fill();
+      }
+
+      const diskGrad = ctx.createRadialGradient(f.x - 1, f.y - 1, 1, f.x, f.y, f.radius * 0.62);
+      diskGrad.addColorStop(0, '#926332');
+      diskGrad.addColorStop(1, '#5e3818');
+      ctx.fillStyle = diskGrad;
+      ctx.beginPath();
+      ctx.arc(f.x, f.y, f.radius * 0.52, 0, Math.PI * 2);
+      ctx.fill();
+
+      // Seed texture
+      ctx.fillStyle = 'rgba(36, 20, 10, 0.55)';
+      for (let i = 0; i < 14; i++) {
+        const a = (Math.PI * 2 / 14) * i;
+        const r = f.radius * 0.28 + (i % 2) * 1.2;
+        ctx.beginPath();
+        ctx.arc(f.x + Math.cos(a) * r, f.y + Math.sin(a) * r, 0.9, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+
+    function drawPoppy(f) {
+      const petals = 4;
+      const tilt = Math.sin((f.y + performance.now() * 0.04) * 0.018) * 0.14;
+      for (let i = 0; i < petals; i++) {
+        const a = (Math.PI * 2 / petals) * i + tilt;
+        const px = f.x + Math.cos(a) * f.radius * 0.38;
+        const py = f.y + Math.sin(a) * f.radius * 0.38;
+        const petalGrad = ctx.createRadialGradient(px - 1, py - 1, 1, px, py, f.radius * 0.95);
+        petalGrad.addColorStop(0, '#ff6f8f');
+        petalGrad.addColorStop(1, '#e61f4c');
+        ctx.fillStyle = petalGrad;
+        ctx.beginPath();
+        ctx.ellipse(px, py, f.radius * 0.78, f.radius * 0.52, a, 0, Math.PI * 2);
+        ctx.fill();
+      }
+
+      ctx.fillStyle = '#2e1b1b';
+      ctx.beginPath();
+      ctx.arc(f.x, f.y, Math.max(2.2, f.radius * 0.26), 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = '#f7e181';
+      for (let i = 0; i < 8; i++) {
+        const a = (Math.PI * 2 / 8) * i;
+        ctx.beginPath();
+        ctx.arc(f.x + Math.cos(a) * f.radius * 0.24, f.y + Math.sin(a) * f.radius * 0.24, 0.8, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+
+    function drawFlowerByType(f) {
+      if (f.type === 'lavender') {
+        drawLavenderFlower(f);
+      } else if (f.type === 'sunflower') {
+        drawSunflower(f);
+      } else if (f.type === 'poppy') {
+        drawPoppy(f);
+      } else {
+        // Fallback flower.
+        ctx.fillStyle = '#ffd97a';
+        ctx.beginPath();
+        ctx.arc(f.x, f.y, Math.max(2.5, f.radius * 0.35), 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+
+    function drawField() {
+      const g = ctx.createLinearGradient(0, 0, 0, world.h);
+      g.addColorStop(0, '#87ceeb');
+      g.addColorStop(0.45, '#c9f0ff');
+      g.addColorStop(1, '#58a85a');
+      ctx.fillStyle = g;
+      ctx.fillRect(0, 0, world.splitX, world.h);
+
+      const area = getCurrentArea();
+      for (const biome of area.biomes) {
+        const x = world.splitX * biome.x0;
+        const w = world.splitX * (biome.x1 - biome.x0);
+        const tint = biome.type === 'lavender'
+          ? 'rgba(123, 77, 255, 0.08)'
+          : (biome.type === 'sunflower' ? 'rgba(255, 194, 46, 0.08)' : 'rgba(255, 71, 111, 0.08)');
+        ctx.fillStyle = tint;
+        ctx.fillRect(x, 0, w, world.h);
+
+        ctx.fillStyle = 'rgba(5, 15, 22, 0.55)';
+        ctx.fillRect(x + 10, world.h - 34, Math.max(120, w - 20), 24);
+        ctx.fillStyle = '#e6f5ff';
+        ctx.font = '12px Segoe UI';
+        ctx.fillText(biome.name, x + 16, world.h - 17);
+      }
+
+      ctx.fillStyle = 'rgba(255,255,255,0.75)';
+      for (let i = 0; i < 5; i++) {
+        const cx = 120 + i * 160 + Math.sin(performance.now() * 0.0002 + i) * 18;
+        const cy = 70 + (i % 2) * 20;
+        ctx.beginPath();
+        ctx.ellipse(cx, cy, 44, 17, 0, 0, Math.PI * 2);
+        ctx.fill();
+      }
+
+      for (const f of flowers) drawFlowerByType(f);
+    }
+
+    function drawHiveArea() {
+      const hiveW = world.w - world.splitX;
+      const vanX = world.splitX + hiveW * 0.58;
+      const vanY = world.h * 0.16;
+      const g = ctx.createLinearGradient(world.splitX, 0, world.w, world.h);
+      g.addColorStop(0, '#6a432d');
+      g.addColorStop(0.55, '#4a2d1e');
+      g.addColorStop(1, '#2b1a12');
+      ctx.fillStyle = g;
+      ctx.fillRect(world.splitX, 0, world.w - world.splitX, world.h);
+
+      // Wall divider with glowing hive seam.
+      const seam = ctx.createLinearGradient(world.splitX - 6, 0, world.splitX + 8, 0);
+      seam.addColorStop(0, 'rgba(250, 193, 98, 0.02)');
+      seam.addColorStop(0.5, 'rgba(255, 216, 135, 0.45)');
+      seam.addColorStop(1, 'rgba(255, 255, 255, 0.05)');
+      ctx.fillStyle = seam;
+      ctx.fillRect(world.splitX - 6, 0, 14, world.h);
+
+      // Interior perspective floor lines.
+      ctx.strokeStyle = 'rgba(255, 205, 126, 0.20)';
+      ctx.lineWidth = 1;
+      for (let i = 0; i < 11; i++) {
+        const y = world.h * (0.36 + i * 0.062);
+        ctx.beginPath();
+        ctx.moveTo(world.splitX + 6, y);
+        ctx.lineTo(world.w - 10, y + (i * 1.1));
+        ctx.stroke();
+      }
+      ctx.strokeStyle = 'rgba(255, 186, 105, 0.18)';
+      for (let i = 0; i < 10; i++) {
+        const x = world.splitX + 18 + i * (hiveW - 44) / 9;
+        ctx.beginPath();
+        ctx.moveTo(x, world.h);
+        ctx.lineTo(vanX + (x - vanX) * 0.12, vanY + 20);
+        ctx.stroke();
+      }
+
+      // Main arched entrance with depth.
+      const gateY = world.h * 0.53;
+      const gateW = 86;
+      const gateH = 188;
+      drawRoundedRect(world.splitX - 30, gateY - gateH / 2, gateW, gateH, 42, 'rgba(22, 12, 7, 0.78)', 'rgba(255, 213, 136, 0.38)');
+      drawRoundedRect(world.splitX - 18, gateY - gateH / 2 + 14, gateW - 24, gateH - 30, 30, 'rgba(7, 4, 2, 0.9)', 'rgba(255, 179, 97, 0.24)');
+      const entryGlow = ctx.createRadialGradient(world.splitX + 16, gateY, 10, world.splitX + 16, gateY, 72);
+      entryGlow.addColorStop(0, 'rgba(255, 161, 74, 0.28)');
+      entryGlow.addColorStop(1, 'rgba(255, 161, 74, 0)');
+      ctx.fillStyle = entryGlow;
+      ctx.beginPath();
+      ctx.ellipse(world.splitX + 16, gateY, 74, 98, 0, 0, Math.PI * 2);
+      ctx.fill();
+
+      for (const c of hiveCells) drawHex(c.x, c.y, 18, '#c9902e', '#8a5e20');
+
+      ctx.fillStyle = 'rgba(255, 199, 66, 0.28)';
+      ctx.fillRect(world.splitX + 22, world.h - 108, 170, 72);
+      ctx.strokeStyle = 'rgba(255, 223, 131, 0.8)';
+      ctx.lineWidth = 2;
+      ctx.strokeRect(world.splitX + 22, world.h - 108, 170, 72);
+      ctx.fillStyle = '#ffe8aa';
+      ctx.font = '14px Segoe UI';
+      ctx.fillText('Altar del Nectar', world.splitX + 40, world.h - 78);
+      ctx.fillText('Deposito Real', world.splitX + 56, world.h - 58);
+
+      if (state.zone === 'hive' && state.pollen > 0) {
+        const glow = 0.25 + Math.sin(performance.now() * 0.01) * 0.08;
+        ctx.fillStyle = `rgba(255, 205, 102, ${glow})`;
+        ctx.fillRect(world.splitX + 20, world.h - 112, 174, 80);
+      }
+
+      // Dynamic roof: covers the full hive area from field view, then dissipates in hive.
+      const roofAlpha = 0.10 + state.hiveRoofFade * 0.68;
+      if (roofAlpha > 0.02) {
+        const roofGrad = ctx.createLinearGradient(world.splitX, 0, world.w, world.h);
+        roofGrad.addColorStop(0, `rgba(52, 26, 14, ${roofAlpha})`);
+        roofGrad.addColorStop(0.55, `rgba(33, 17, 11, ${roofAlpha * 0.95})`);
+        roofGrad.addColorStop(1, `rgba(14, 8, 6, ${roofAlpha * 0.92})`);
+        ctx.fillStyle = roofGrad;
+        ctx.fillRect(world.splitX, 0, hiveW, world.h);
+
+        ctx.strokeStyle = `rgba(255, 198, 118, ${roofAlpha * 0.45})`;
+        ctx.lineWidth = 1;
+        for (let i = 0; i < 9; i++) {
+          const x = world.splitX + 16 + i * (hiveW - 32) / 8;
+          ctx.beginPath();
+          ctx.moveTo(x, 0);
+          ctx.lineTo(x + Math.sin(i * 0.9) * 8, world.h);
+          ctx.stroke();
+        }
+
+        // Beehive-cell texture over the full roof.
+        const cellA = `rgba(255, 196, 108, ${roofAlpha * 0.16})`;
+        const cellB = `rgba(255, 143, 61, ${roofAlpha * 0.09})`;
+        for (let ry = -16; ry < world.h + 18; ry += 38) {
+          for (let rx = world.splitX + 10; rx < world.w + 24; rx += 42) {
+            drawHex(
+              rx + ((Math.floor((ry + 16) / 38) % 2) ? 20 : 0),
+              ry,
+              12.5,
+              (Math.floor((rx + ry) / 42) % 2) ? cellA : cellB,
+              `rgba(255, 205, 126, ${roofAlpha * 0.18})`
+            );
+          }
+        }
+      }
+
+      for (const b of hiveBees) drawTinyBee(b.x, b.y);
+    }
+
+    function hexToRgba(hex, a) {
+      const h = hex.replace('#', '');
+      const full = h.length === 3 ? h.split('').map(c => c + c).join('') : h;
+      const n = parseInt(full, 16);
+      return `rgba(${(n >> 16) & 255},${(n >> 8) & 255},${n & 255},${a})`;
+    }
+
+    function drawFxParticles() {
+      for (const p of fxParticles) {
+        const alpha = Math.max(0, p.life / 0.65);
+        ctx.fillStyle = hexToRgba(p.color, alpha);
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, p.size, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+
+    function drawTopLabels() {
+      const tagY = 10;
+      drawRoundedRect(world.splitX - 178, tagY, 164, 26, 8, 'rgba(6, 16, 26, 0.36)', 'rgba(255,255,255,0.16)');
+      drawRoundedRect(world.splitX + 14, tagY, 154, 26, 8, 'rgba(32, 22, 12, 0.34)', 'rgba(255,255,255,0.16)');
+      ctx.fillStyle = '#d7ecff';
+      ctx.font = 'bold 12px Segoe UI';
+      ctx.fillText('Campo de Lavandas', world.splitX - 168, tagY + 17);
+      ctx.fillStyle = '#ffe5b8';
+      ctx.fillText('Nexo Hexagonal', world.splitX + 24, tagY + 17);
+    }
+
+    function drawRaidAlerts() {
+      if (enemies.length <= 0 && raidState.flash <= 0.02) return;
+      const pulse = 0.5 + Math.sin(raidState.pulse * 2.2) * 0.5;
+      const alpha = Math.max(raidState.flash, enemies.length > 0 ? 0.12 + pulse * 0.08 : 0);
+      ctx.strokeStyle = `rgba(255, 72, 72, ${Math.min(0.92, alpha)})`;
+      ctx.lineWidth = 8;
+      ctx.strokeRect(4, 4, world.w - 8, world.h - 8);
+
+      const bannerW = Math.min(420, world.w * 0.58);
+      drawRoundedRect((world.w - bannerW) / 2, 14, bannerW, 34, 10, `rgba(44, 0, 0, ${0.45 + alpha * 0.22})`, `rgba(255, 106, 106, ${0.7 + pulse * 0.2})`);
+      ctx.fillStyle = '#ffd3d3';
+      ctx.font = 'bold 14px Segoe UI';
+      ctx.fillText(`ALERTA DE RAID - ENEMIGOS ACTIVOS: ${enemies.length}`, (world.w - bannerW) / 2 + 18, 36);
+    }
+
+    function drawRoundedRect(x, y, w, h, r, fill, stroke) {
+      ctx.beginPath();
+      ctx.moveTo(x + r, y);
+      ctx.lineTo(x + w - r, y);
+      ctx.quadraticCurveTo(x + w, y, x + w, y + r);
+      ctx.lineTo(x + w, y + h - r);
+      ctx.quadraticCurveTo(x + w, y + h, x + w - r, y + h);
+      ctx.lineTo(x + r, y + h);
+      ctx.quadraticCurveTo(x, y + h, x, y + h - r);
+      ctx.lineTo(x, y + r);
+      ctx.quadraticCurveTo(x, y, x + r, y);
+      if (fill) { ctx.fillStyle = fill; ctx.fill(); }
+      if (stroke) { ctx.strokeStyle = stroke; ctx.lineWidth = 1; ctx.stroke(); }
+    }
+
+    function drawHudCard(card, label, value) {
+      drawRoundedRect(card.x, card.y, card.w, card.h, 8, 'rgba(7, 18, 30, 0.58)', 'rgba(255,255,255,0.14)');
+      ctx.fillStyle = '#9bb8d4';
+      ctx.font = '10px Segoe UI';
+      ctx.fillText(label.toUpperCase(), card.x + 9, card.y + 14);
+      ctx.fillStyle = '#edf6ff';
+      ctx.font = 'bold 21px Segoe UI';
+      ctx.fillText(value, card.x + 9, card.y + 32);
+    }
+
+    function drawUpgradeItem(x, y, w, key, title, desc) {
+      const def = upgradeDefs[key];
+      const lvl = state.upgrades[key];
+      const maxed = lvl >= def.max;
+      const cost = getUpgradeCost(key);
+      const canBuy = !maxed && state.royalPollen >= cost;
+
+      drawRoundedRect(x, y, w, 38, 7, 'rgba(0, 0, 0, 0.22)', 'rgba(255,255,255,0.12)');
+      ctx.fillStyle = '#f2fbff';
+      ctx.font = 'bold 13px Segoe UI';
+      ctx.fillText(title, x + 10, y + 15);
+      ctx.fillStyle = '#9db4cb';
+      ctx.font = '10px Segoe UI';
+      ctx.fillText(maxed ? `Nvl ${lvl}/${def.max} - MAX` : `Nvl ${lvl}/${def.max} - ${desc} - Costo ${cost}`, x + 10, y + 30);
+
+      const bw = 72, bh = 22;
+      const bx = x + w - bw - 10;
+      const by = y + 8;
+      const fill = maxed ? 'rgba(130,130,130,0.35)' : (canBuy ? 'rgba(255, 202, 43, 0.20)' : 'rgba(130,130,130,0.22)');
+      const stroke = maxed ? 'rgba(180,180,180,0.35)' : (canBuy ? 'rgba(255, 220, 120, 0.6)' : 'rgba(180,180,180,0.25)');
+      drawRoundedRect(bx, by, bw, bh, 7, fill, stroke);
+      ctx.fillStyle = maxed ? '#d7d7d7' : '#ffe3a5';
+      ctx.font = 'bold 11px Segoe UI';
+      ctx.fillText(maxed ? 'MAX' : 'MEJORAR', bx + 9, by + 15);
+
+      uiButtons.push({
+        x: bx, y: by, w: bw, h: bh, disabled: false,
+        action: () => {
+          const result = buyUpgrade(key);
+          if (result === 'insufficient') {
+            AudioFx.blip(210, 0.06, 0.025, 'sawtooth');
+            setUINotice(`Polen Real insuficiente para ${title}.`, 'warn');
+          } else if (result === 'max') {
+            AudioFx.blip(320, 0.05, 0.02, 'square');
+            setUINotice(`${title} ya esta en MAX.`, 'info');
+          } else if (result === 'ok') {
+            setUINotice(`${title} mejorado.`, 'ok');
+          }
+        }
+      });
+    }
+
+    function rarityColor(rarity) {
+      if (rarity === 'Mitico') return '#ff4aa2';
+      if (rarity === 'Legendario') return '#ffcb5a';
+      if (rarity === 'Epico') return '#af7bff';
+      if (rarity === 'Raro') return '#5cc7ff';
+      if (rarity === 'Poco Comun') return '#82df94';
+      return '#e2e2e2';
+    }
+
+    function drawSpeciesPortrait(x, y, color, role) {
+      drawRoundedRect(x, y, 38, 38, 8, 'rgba(8, 17, 28, 0.9)', 'rgba(255,255,255,0.2)');
+      ctx.save();
+      ctx.translate(x + 19, y + 20);
+      ctx.fillStyle = 'rgba(255,255,255,0.55)';
+      ctx.beginPath();
+      ctx.ellipse(-6, -5, 6, 3, -0.5, 0, Math.PI * 2);
+      ctx.ellipse(6, -5, 6, 3, 0.5, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = '#f8bf35';
+      ctx.beginPath();
+      ctx.ellipse(0, 0, 8, 5, 0, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = color;
+      ctx.beginPath();
+      ctx.arc(-5, 0, 2.2, 0, Math.PI * 2);
+      ctx.fill();
+      if (role === 'offensive') {
+        ctx.strokeStyle = color;
+        ctx.lineWidth = 1.2;
+        ctx.beginPath();
+        ctx.moveTo(5, 2);
+        ctx.lineTo(10, -2);
+        ctx.stroke();
+      } else if (role === 'worker') {
+        ctx.fillStyle = '#ffe2a8';
+        ctx.fillRect(5, -3, 4, 6);
+      } else {
+        ctx.fillStyle = '#ffe58c';
+        ctx.beginPath();
+        ctx.arc(8, -2, 2, 0, Math.PI * 2);
+        ctx.fill();
+      }
+      ctx.restore();
+    }
+
+    function drawAbilityIcon(x, y, ability) {
+      const isPassive = ability.kind === 'passive';
+      drawRoundedRect(
+        x, y, 20, 20, 5,
+        isPassive ? 'rgba(80, 187, 255, 0.2)' : 'rgba(255, 126, 126, 0.2)',
+        isPassive ? 'rgba(117, 212, 255, 0.7)' : 'rgba(255, 165, 165, 0.7)'
+      );
+      ctx.fillStyle = isPassive ? '#7de1ff' : '#ffabab';
+      ctx.font = 'bold 11px Segoe UI';
+      ctx.fillText(isPassive ? 'P' : 'A', x + 6, y + 14);
+    }
+
+    function drawHud() {
+      uiButtons.length = 0;
+      const topY = 12;
+      drawRoundedRect(14, topY, 108, 30, 9, 'rgba(6,14,24,0.72)', 'rgba(255,255,255,0.18)');
+      drawRoundedRect(128, topY, 122, 30, 9, 'rgba(6,14,24,0.72)', 'rgba(255,255,255,0.18)');
+      ctx.fillStyle = '#dff3ff';
+      ctx.font = 'bold 13px Segoe UI';
+      ctx.fillText('Panel', 49, topY + 20);
+      ctx.fillText('Colonia', 167, topY + 20);
+      uiButtons.push({ x: 14, y: topY, w: 108, h: 30, disabled: false, action: () => { uiState.panelOpen = !uiState.panelOpen; } });
+      uiButtons.push({ x: 128, y: topY, w: 122, h: 30, disabled: false, action: () => { uiState.colonyOpen = !uiState.colonyOpen; } });
+
+      if (uiState.panelOpen) {
+        const modalW = Math.min(460, world.w * 0.4);
+        const modalH = 300;
+        const mx = 18;
+        const my = 52;
+        drawRoundedRect(mx, my, modalW, modalH, 12, 'rgba(8, 16, 28, 0.78)', 'rgba(255,255,255,0.2)');
+        ctx.fillStyle = '#f5fbff';
+        ctx.font = 'bold 20px Segoe UI';
+        ctx.fillText('Panel de Colmena', mx + 14, my + 28);
+        ctx.fillStyle = '#9ab2ca';
+        ctx.font = '11px Segoe UI';
+        ctx.fillText('Gestion rapida sin tapar el juego', mx + 14, my + 44);
+
+        const cardGap = 8;
+        const cardW = Math.floor((modalW - 14 * 2 - cardGap) / 2);
+        const tempCard = [
+          { x: mx + 14, y: my + 52, w: cardW, h: 42 },
+          { x: mx + 14 + cardW + cardGap, y: my + 52, w: cardW, h: 42 },
+          { x: mx + 14, y: my + 98, w: cardW, h: 42 },
+          { x: mx + 14 + cardW + cardGap, y: my + 98, w: cardW, h: 42 }
+        ];
+        drawHudCard(tempCard[0], 'Carga', `${state.pollen}/${state.pollenCap}`);
+        drawHudCard(tempCard[1], 'Nectar', `${state.honey}`);
+        drawHudCard(tempCard[2], 'Raiders', `${enemies.length}`);
+        drawHudCard(tempCard[3], 'Polen R', `${state.royalPollen}`);
+
+        const ux = mx + 14;
+        const uw = modalW - 28;
+        let uy = my + 146;
+        drawUpgradeItem(ux, uy, uw, 'cap', 'Alforja Real', '+5 carga');
+        uy += 43;
+        drawUpgradeItem(ux, uy, uw, 'speed', 'Impulso Alado', '+18 velocidad');
+        uy += 43;
+        drawUpgradeItem(ux, uy, uw, 'refine', 'Refinado Ambar', '+20% conversion');
+      }
+
+      if (uiState.colonyOpen) {
+        const sideW = Math.min(390, world.w * 0.34);
+        const sx = world.w - sideW - 14;
+        const sy = 52;
+        const sh = world.h - 66;
+        drawRoundedRect(sx, sy, sideW, sh, 12, 'rgba(7,14,25,0.86)', 'rgba(255,255,255,0.2)');
+        ctx.fillStyle = '#ecf7ff';
+        ctx.font = 'bold 19px Segoe UI';
+        ctx.fillText('Menu de Colonia', sx + 14, sy + 28);
+
+        const roles = ['offensive', 'worker', 'pollinator'];
+        const roleLabels = { offensive: 'Ofensivas', worker: 'Trabajadoras', pollinator: 'Polinizadoras' };
+        for (let i = 0; i < roles.length; i++) {
+          const r = roles[i];
+          const bx = sx + 14 + i * 122;
+          const by = sy + 38;
+          const active = uiState.selectedRole === r;
+          drawRoundedRect(
+            bx, by, 112, 28, 8,
+            active ? 'rgba(80, 168, 255, 0.26)' : 'rgba(255,255,255,0.07)',
+            active ? 'rgba(139, 216, 255, 0.8)' : 'rgba(255,255,255,0.2)'
+          );
+          ctx.fillStyle = active ? '#d9f4ff' : '#a6bcd0';
+          ctx.font = 'bold 11px Segoe UI';
+          ctx.fillText(roleLabels[r], bx + 12, by + 18);
+          uiButtons.push({ x: bx, y: by, w: 112, h: 28, disabled: false, action: () => { uiState.selectedRole = r; } });
+        }
+
+        const speciesList = BEE_SPECIES[uiState.selectedRole] || [];
+        let cy = sy + 78;
+        for (const sp of speciesList) {
+          const unlocked = sp.unlock();
+          const active = colony.species[uiState.selectedRole] === sp.id;
+          drawRoundedRect(
+            sx + 14, cy, sideW - 28, 98, 10,
+            active ? 'rgba(79, 148, 255, 0.16)' : 'rgba(255,255,255,0.04)',
+            active ? 'rgba(136, 210, 255, 0.7)' : 'rgba(255,255,255,0.16)'
+          );
+          drawSpeciesPortrait(sx + 24, cy + 12, sp.color, uiState.selectedRole);
+          ctx.fillStyle = '#e9f7ff';
+          ctx.font = 'bold 14px Segoe UI';
+          ctx.fillText(sp.name, sx + 70, cy + 27);
+          ctx.fillStyle = rarityColor(sp.rarity);
+          ctx.font = 'bold 11px Segoe UI';
+          ctx.fillText(sp.rarity, sx + 70, cy + 43);
+
+          const abilityY = cy + 50;
+          for (let i = 0; i < (sp.abilities || []).length; i++) {
+            const ab = sp.abilities[i];
+            const ix = sx + 70 + i * 150;
+            drawAbilityIcon(ix, abilityY, ab);
+            ctx.fillStyle = '#b8d0e6';
+            ctx.font = '10px Segoe UI';
+            ctx.fillText(ab.name, ix + 26, abilityY + 13);
+          }
+
+          if (unlocked) {
+            const txt = active ? 'ACTIVA' : 'USAR';
+            drawRoundedRect(sx + sideW - 106, cy + 66, 78, 24, 7, 'rgba(255, 196, 92, 0.20)', 'rgba(255, 218, 146, 0.8)');
+            ctx.fillStyle = '#ffe3b0';
+            ctx.font = 'bold 11px Segoe UI';
+            ctx.fillText(txt, sx + sideW - 80, cy + 82);
+            if (!active) {
+              uiButtons.push({
+                x: sx + sideW - 106, y: cy + 66, w: 78, h: 24, disabled: false,
+                action: () => { colony.species[uiState.selectedRole] = sp.id; setUINotice(`${sp.name} equipada.`, 'ok'); }
+              });
+            }
+          } else {
+            drawRoundedRect(sx + sideW - 132, cy + 66, 104, 24, 7, 'rgba(255, 80, 80, 0.18)', 'rgba(255, 134, 134, 0.6)');
+            ctx.fillStyle = '#ffc6c6';
+            ctx.font = 'bold 10px Segoe UI';
+            ctx.fillText('BLOQUEADA', sx + sideW - 102, cy + 82);
+          }
+          cy += 106;
+          if (cy + 98 > sy + sh - 10) break;
+        }
+      }
+
+      if (uiNotice.timer > 0) {
+        const alpha = Math.min(1, uiNotice.timer / 0.4);
+        const color = uiNotice.kind === 'warn'
+          ? `rgba(255, 186, 122, ${alpha})`
+          : (uiNotice.kind === 'ok' ? `rgba(139, 255, 182, ${alpha})` : `rgba(202, 220, 240, ${alpha})`);
+        drawRoundedRect(18, world.h - 42, Math.min(560, world.w * 0.56), 28, 8, 'rgba(0,0,0,0.35)', 'rgba(255,255,255,0.2)');
+        ctx.fillStyle = color;
+        ctx.font = 'bold 12px Segoe UI';
+        ctx.fillText(uiNotice.text, 28, world.h - 24);
+      }
+    }
+
+    function render() {
+      ctx.clearRect(0, 0, world.w, world.h);
+      drawField();
+      drawHiveArea();
+      drawColonySystems();
+      drawTopLabels();
+      drawSovereignBee(player.x, player.y);
+      drawFxParticles();
+      drawRaidAlerts();
+      drawHud();
+    }
+
+    let prev = performance.now();
+    function frame(now) {
+      const dt = Math.min(0.033, (now - prev) / 1000);
+      prev = now;
+      update(dt);
+      render();
+      requestAnimationFrame(frame);
+    }
+
+    function pointInRect(px, py, r) {
+      return px >= r.x && px <= (r.x + r.w) && py >= r.y && py <= (r.y + r.h);
+    }
+
+    function handleUIClick(x, y) {
+      for (let i = uiButtons.length - 1; i >= 0; i--) {
+        const b = uiButtons[i];
+        if (pointInRect(x, y, b)) {
+          b.action();
+          return true;
+        }
+      }
+      return false;
+    }
+
+    function refreshCursor(x, y) {
+      let onButton = false;
+      for (let i = uiButtons.length - 1; i >= 0; i--) {
+        const b = uiButtons[i];
+        if (pointInRect(x, y, b)) {
+          onButton = true;
+          break;
+        }
+      }
+      canvas.style.cursor = onButton ? 'pointer' : 'default';
+    }
+
+    window.addEventListener('keydown', e => {
+      if (e.code === 'KeyH') {
+        uiState.panelOpen = !uiState.panelOpen;
+        return;
+      }
+      if (e.code === 'KeyJ') {
+        cycleSpecies('offensive');
+        return;
+      }
+      if (e.code === 'KeyK') {
+        cycleSpecies('worker');
+        return;
+      }
+      if (e.code === 'KeyL') {
+        cycleSpecies('pollinator');
+        return;
+      }
+      if (e.code === 'KeyB') {
+        cycleAssignedBiome();
+        return;
+      }
+      keys[e.code] = true;
+      AudioFx.init();
+    });
+    window.addEventListener('keyup', e => { keys[e.code] = false; });
+    window.addEventListener('blur', () => Object.keys(keys).forEach(k => keys[k] = false));
+
+    canvas.addEventListener('pointerdown', e => {
+      lastPointerDownAt = performance.now();
+      AudioFx.init();
+      const rect = canvas.getBoundingClientRect();
+      const x = e.clientX - rect.left;
+      const y = e.clientY - rect.top;
+      const clickedUI = handleUIClick(x, y);
+      if (!clickedUI) {
+        let pickedEnemy = null;
+        for (let i = enemies.length - 1; i >= 0; i--) {
+          const en = enemies[i];
+          if (dist2(x, y, en.x, en.y) <= (en.size + 10) * (en.size + 10)) {
+            pickedEnemy = en;
+            break;
+          }
+        }
+        if (pickedEnemy) {
+          colony.assignedEnemyId = pickedEnemy.id;
+          setUINotice('Objetivo asignado a las Ofensivas.', 'info');
+        }
+      }
+    });
+
+    canvas.addEventListener('click', e => {
+      if (performance.now() - lastPointerDownAt < 220) return;
+      const rect = canvas.getBoundingClientRect();
+      const x = e.clientX - rect.left;
+      const y = e.clientY - rect.top;
+      handleUIClick(x, y);
+    });
+
+    canvas.addEventListener('pointermove', e => {
+      const rect = canvas.getBoundingClientRect();
+      const x = e.clientX - rect.left;
+      const y = e.clientY - rect.top;
+      refreshCursor(x, y);
+    });
+
+    canvas.addEventListener('pointerleave', () => {
+      canvas.style.cursor = 'default';
+    });
+
+    window.addEventListener('resize', fitCanvas);
+
+    fitCanvas();
+    resetGame();
+    requestAnimationFrame(frame);
+  </script>
+</body>
+</html>

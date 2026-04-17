@@ -1,0 +1,42 @@
+{
+  "name": "natbee",
+  "productName": "NatBee",
+  "version": "2026.4.17-t0300",
+  "description": "NatBee - Ocean and Wild Studios",
+  "main": "main.js",
+  "author": "Ocean and Wild Studios",
+  "license": "UNLICENSED",
+  "scripts": {
+    "start": "electron .",
+    "dist": "electron-builder --win nsis --publish never"
+  },
+  "devDependencies": {
+    "electron": "^33.2.1",
+    "electron-builder": "^25.1.8"
+  },
+  "build": {
+    "appId": "com.oceanandwild.natbee",
+    "productName": "NatBee",
+    "artifactName": "NatBee-${version}-Setup.${ext}",
+    "files": [
+      "index.html",
+      "natbee.png",
+      "assets/**/*",
+      "main.js",
+      "preload.js",
+      "package.json"
+    ],
+    "directories": {
+      "output": "dist"
+    },
+    "win": {
+      "target": ["nsis"],
+      "icon": "build/natbee-icon.ico"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true
+    }
+  }
+}
